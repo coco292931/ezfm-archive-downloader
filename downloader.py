@@ -601,7 +601,12 @@ def _download_for_span(start_ymd, end_ymd, *, program_ids, base_downloads_dir, d
     print("\n----- 节目列表获取完成，开始下载 -----\n")
 
     # ---- 阶段 2：实际下载 ----
-    limiter = _TokenBucketLimiter(max_rate_kbps) if float(max_rate_kbps or 0) > 0 else None
+    is_set_max_rate_kbps = True if float(max_rate_kbps or 0) > 0 else False
+    if is_set_max_rate_kbps:
+        limiter = _TokenBucketLimiter(max_rate_kbps)
+        print(f"已启用下载限速: {max_rate_kbps} KB/s\n")
+    else:
+        limiter = None
     images_dir = os.path.join(base_downloads_dir, "images")
     downloaded_images_log = os.path.join(base_downloads_dir, "downloaded_images.txt")
     images_info_log = os.path.join(images_dir, "images_info.txt")
