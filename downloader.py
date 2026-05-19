@@ -689,7 +689,7 @@ def _download_for_span(start_ymd, end_ymd, *, program_ids, base_downloads_dir, d
                 download_image(img_url, images_dir, headers, downloaded_images_log, images_info_log, img_base, state_checker=state_checker)
 
             if os.path.exists(file_path):
-                print(f"已存在，跳过下载: {_fmt_path(file_path)}")
+                print(f" {_fmt_path(file_path)} 已存在，跳过下载")
                 _day_index += 1
                 #pname_with_pid = f"{pid} ({_get_program_name(pid, cache_dir=api_cache_dir)})"
                 #small_id = str(item.get("programId") or "")
