@@ -2,8 +2,7 @@
 
 EZFM / Hit FM 历史节目（点播回听）下载器
 
-> **项目来源**：原为云听（YunTing）历史节目下载器，现已全面切换到 EZFM API（aezfm.meldingcloud.com），
-> 绕开云听的签名鉴权，直接通过 `/program/historyList` 接口获取 Hit FM 各节目的历史回放数据。
+>本项目是[云听下载器](https://github.com/coco292931/YunTing-archive-downloader/)和[阿基米德下载器 ](https://github.com/coco292931/ajmide-archive-downloader/)的姊妹项目，共同隶属于hitfm归档计划中
 
 ## 说明
 
@@ -17,7 +16,7 @@ EZFM / Hit FM 历史节目（点播回听）下载器
 
 
 
-在这曲终人散之时，趁着云听尚存有Hit FM的回放，故写这样一个下载器，保存下来曾经的回忆
+在这曲终人散之时，趁着ezfm尚存有Hit FM的回放，故写这样一个下载器，保存下来曾经的回忆
 
 ## 原理
 
