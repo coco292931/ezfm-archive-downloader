@@ -793,7 +793,7 @@ class ezfmDownloaderGUI:
         dt = max(now - self.last_speed_ts, 1e-6)
         self.last_speed_ts = now
 
-        speed_mbps = delta_bytes / dt / 1_000_000.0 if self.is_downloading else 0.0
+        speed_mbps = delta_bytes / dt / 1_024_000.0 if self.is_downloading else 0.0
         cpu_percent = self.cpu_sampler.get_percent()
 
         self.speed_var.set(f"下载速率 {speed_mbps:.2f}MB/s")
