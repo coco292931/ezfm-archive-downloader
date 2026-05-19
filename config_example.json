@@ -14,6 +14,7 @@
     "download_images": true,
     "name_filter_regex": "",
     "filename_template": "{date}\\{name}",
+    "response_cache_ttl_minute": 360,
     "ffmpeg_path": "",
     "convert_out_dir": "downloads_converts",
     "convert_format": "opus",

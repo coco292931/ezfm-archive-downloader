@@ -110,6 +110,7 @@ class ezfmDownloaderGUI:
         self.program_ids_var = tk.StringVar(value=",".join(DEFAULT_PROGRAM_IDS))
         self.output_dir_var = tk.StringVar(value="downloads")
         self.delay_var = tk.StringVar(value="1.5")
+        self.response_cache_ttl_var = tk.StringVar(value="60")
         
         
         self.download_images_var = tk.BooleanVar(value=True)
@@ -187,6 +188,7 @@ class ezfmDownloaderGUI:
             "name_filter_regex": self.name_filter_regex_var.get(),
             "filename_template": self.filename_template_var.get(),
             "ffmpeg_path": self.ffmpeg_path_var.get().strip(),
+            "response_cache_ttl_minute": int(self.response_cache_ttl_var.get().strip() or 60),
             "convert_out_dir": self.convert_out_dir_var.get().strip(),
             "convert_format": self.convert_format_var.get().strip(),
             "convert_bitrate": self.convert_bitrate_var.get().strip(),
@@ -232,7 +234,7 @@ class ezfmDownloaderGUI:
                     out_dir = config.get("output_dir", "downloads")
                     self.output_dir_var.set(out_dir)
                     
-                    self.delay_var.set(str(config.get("delay", 1.5)))
+                    self.delay_var.set(int(config.get("delay", 1.5)))
                     try:
                         self.max_rate_kbps = int(config.get("max_rate_kbps", 0) or 0)
                     except Exception:
@@ -241,6 +243,8 @@ class ezfmDownloaderGUI:
                     self.download_images_var.set(config.get("download_images", True))
                     self.name_filter_regex_var.set(config.get("name_filter_regex", ""))
                     self.filename_template_var.set(config.get("filename_template", r"{date}\{name}"))
+                    self.response_cache_ttl_var.set(int(config.get("response_cache_ttl_minute", 60)))
+
                     self.ffmpeg_path_var.set(config.get("ffmpeg_path", ""))
                     
                     conv_dir = config.get("convert_out_dir", "")
@@ -703,6 +707,7 @@ class ezfmDownloaderGUI:
             is_download_imgs = self.download_images_var.get()
             name_filter_regex = self.name_filter_regex_var.get().strip()
             filename_template = self.filename_template_var.get().strip() or r"{date}\{name}"
+            response_cache_ttl_second = int(self.response_cache_ttl_var.get().strip() or 60) * 60
             max_rate_kbps = self.max_rate_kbps
             
             post_cb = self.auto_converter_callback if self.auto_convert_var.get() else None
@@ -718,6 +723,7 @@ class ezfmDownloaderGUI:
                     post_process_cb=post_cb, download_progress_cb=self.on_download_progress,
                     name_filter_regex=name_filter_regex, filename_template=filename_template,
                     max_rate_kbps=max_rate_kbps, delay_seconds=delay,
+                    cache_ttl_seconds=response_cache_ttl_second,
                 )
             else:
                 end_date_str = self.end_date_var.get().strip()
@@ -730,6 +736,7 @@ class ezfmDownloaderGUI:
                     name_filter_regex=name_filter_regex,
                     filename_template=filename_template,
                     max_rate_kbps=max_rate_kbps, delay_seconds=delay,
+                    cache_ttl_seconds=response_cache_ttl_second,
                 )
         except StopDownloadException as e:
             #print(f"\n>>>> 任务安全切断: {e} <<<<")

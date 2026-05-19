@@ -14,20 +14,28 @@ API_BASE = "https://aezfm.meldingcloud.com"
 
 # 大节目 ID 列表（API 不提供枚举接口，需保持此已知集合）
 DEFAULT_PROGRAM_IDS = ["431", "432", "433", "434", "435", "436", "437"]
+API_CACHE_TTL_SECONDS = 6 * 60 * 60
 
 
-def _get_program_name(pid, *, cache_dir=None):
-    """从 API 第一条历史记录动态获取节目名，避免硬编码。"""
+def _get_program_name(pid, *, cache_dir=None, cache_ttl_seconds=API_CACHE_TTL_SECONDS, state_checker=None):
+    """从 API 第一条历史记录动态获取节目名，避免硬编码"""
     try:
-        d = fetch_history_list(str(pid), 1, cache_dir=cache_dir, cache_ttl_seconds=API_CACHE_TTL_SECONDS)
+        d = fetch_history_list(
+            str(pid),
+            1,
+            cache_dir=cache_dir,
+            cache_ttl_seconds=cache_ttl_seconds,
+            state_checker=state_checker,
+        )
         if d and isinstance(d, dict) and d.get("data"):
             items = d["data"]
             if isinstance(items, list) and items:
                 title = items[0].get("title") or items[0].get("programTitle") or ""
                 if title:
                     return title.strip()
-    except Exception:
-        pass
+    except Exception as e:
+        if "StopDownloadException" in str(type(e)):
+            raise
     return str(pid)
 
 # historyList 参数常量
@@ -35,10 +43,8 @@ HISTORY_CATEGORY = "5"
 HISTORY_PAGE_SIZE = 20
 
 # ============================================================
-# API 缓存/降频（降低访问频率，避免频繁打 EZFM）
+# API 缓存/降频（降低访问频率，避免频繁访问 EZFM）
 # ============================================================
-# 默认缓存 6 小时；如希望更激进可调小。
-API_CACHE_TTL_SECONDS = 6 * 60 * 60
 # cache miss 时最小请求间隔（秒）
 API_MIN_INTERVAL_SECONDS = 0.25
 
@@ -47,7 +53,7 @@ _LAST_API_TS = 0.0
 
 
 def _normalize_to_ymd(date_text):
-    """把日期统一成 YYYY-MM-DD；支持 YY-MM-DD / YYYY-MM-DD，失败返回空串。"""
+    """把日期统一成 YYYY-MM-DD；支持 YY-MM-DD / YYYY-MM-DD，失败返回空串"""
     s = (date_text or "").strip()
     if not s:
         return ""
@@ -71,6 +77,11 @@ def _print_section(title, width=40):
     print(line)
     print(str(title).strip())
     print(line)
+
+
+def _check_state(state_checker, *, is_chunk=False):
+    if state_checker:
+        state_checker(is_chunk=is_chunk)
 
 
 def _ensure_cache_dir(cache_dir):
@@ -116,7 +127,7 @@ def _save_downloaded_image(log_file, url):
     with open(log_file, 'a', encoding='utf-8') as f:
         f.write(f"{url}\n")
 
-def download_image(url, img_dir, headers, downloaded_images_log, images_info_log, safe_program_name, suffix=""):
+def download_image(url, img_dir, headers, downloaded_images_log, images_info_log, safe_program_name, suffix="", state_checker=None):
     if not url:
         return ""
     
@@ -141,11 +152,18 @@ def download_image(url, img_dir, headers, downloaded_images_log, images_info_log
                 _save_downloaded_image(downloaded_images_log, url)
             return ""
             
+        _check_state(state_checker, is_chunk=False)
         print(f"正在下载图片: {url} -> '{_fmt_path(img_path)}'")
-        img_response = requests.get(url, headers={'User-Agent': headers.get('user-agent', '')}, stream=True)
+        img_response = requests.get(
+            url,
+            headers={'User-Agent': headers.get('user-agent', '')},
+            stream=True,
+            timeout=(5, 20),
+        )
         img_response.raise_for_status()
         with open(img_path, 'wb') as f:
             for chunk in img_response.iter_content(chunk_size=8192):
+                _check_state(state_checker, is_chunk=True)
                 f.write(chunk)
                 
         _save_downloaded_image(downloaded_images_log, url)
@@ -158,6 +176,8 @@ def download_image(url, img_dir, headers, downloaded_images_log, images_info_log
 
         return f"（新保存：{new_img_name}）"
     except Exception as e:
+        if "StopDownloadException" in str(type(e)):
+            raise
         print(f"下载图片失败 {url}: {e}")
         return "（下载失败）"
 
@@ -238,11 +258,20 @@ def _build_output_file_path(base_downloads_dir, template_rendered, download_url,
 
     return path_no_ext + _extract_audio_extension(download_url)
 
-def fetch_history_list(program_id, page_num=1, *, cache_dir=None, cache_ttl_seconds=API_CACHE_TTL_SECONDS, min_interval_seconds=API_MIN_INTERVAL_SECONDS):
-    """获取 EZFM historyList 单页。
+def fetch_history_list(
+    program_id,
+    page_num=1,
+    *,
+    cache_dir=None,
+    cache_ttl_seconds=API_CACHE_TTL_SECONDS,
+    min_interval_seconds=API_MIN_INTERVAL_SECONDS,
+    state_checker=None,
+    timeout=(5, 15),
+):
+    """获取 EZFM historyList 单页
 
-    - 默认启用磁盘+内存缓存（TTL），减少重复访问。
-    - cache miss 时做最小请求间隔，进一步降频。
+    - 默认启用磁盘+内存缓存（TTL），减少重复访问
+    - cache miss 时做最小请求间隔，进一步降频
     """
     global _LAST_API_TS
 
@@ -261,14 +290,17 @@ def fetch_history_list(program_id, page_num=1, *, cache_dir=None, cache_ttl_seco
         _MEM_HISTORY_CACHE[key] = (now, disk_hit)
         return disk_hit
 
-    # cache miss：做最小请求间隔
+    # cache miss：做最小请求间隔（支持中断）
     wait_s = float(min_interval_seconds or 0) - (now - float(_LAST_API_TS or 0.0))
-    if wait_s > 0:
-        time.sleep(min(wait_s, 2.0))
+    while wait_s > 0:
+        _check_state(state_checker, is_chunk=False)
+        slice_s = min(wait_s, 0.1)
+        time.sleep(slice_s)
+        wait_s -= slice_s
 
     url = f"{API_BASE}/program/historyList"
-    # 注意：该接口在一些环境下不接受 JSON body（会提示 category 为空）。
-    # 使用 form（application/x-www-form-urlencoded）更稳。
+    # 注意：该接口在一些环境下不接受 JSON body（会提示 category 为空）
+    # 使用 form（application/x-www-form-urlencoded）更稳
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Referer": "https://aezfm.meldingcloud.com/",
@@ -282,7 +314,8 @@ def fetch_history_list(program_id, page_num=1, *, cache_dir=None, cache_ttl_seco
     }
 
     try:
-        resp = requests.post(url, data=payload, headers=headers, timeout=10)
+        _check_state(state_checker, is_chunk=False)
+        resp = requests.post(url, data=payload, headers=headers, timeout=timeout)
         resp.raise_for_status()
         data = resp.json()
         _LAST_API_TS = time.time()
@@ -290,6 +323,8 @@ def fetch_history_list(program_id, page_num=1, *, cache_dir=None, cache_ttl_seco
         _cache_set(cache_path, data)
         return data
     except Exception as e:
+        if "StopDownloadException" in str(type(e)):
+            raise
         print(f"获取历史列表失败 (ID: {program_id}, Page: {page_num}): {e}")
         return None
 
@@ -315,11 +350,19 @@ def _write_info_line(base_downloads_dir, show_date_ymd, day_index, program_name,
         print(f"写入节目信息文件失败 {info_txt_path}: {e}")
 
 
-def fetch_all_history(program_id, *, cache_dir=None, cache_ttl_seconds=API_CACHE_TTL_SECONDS):
+def fetch_all_history(program_id, *, cache_dir=None, cache_ttl_seconds=API_CACHE_TTL_SECONDS, state_checker=None):
     all_items = []
     page = 1
+    print(f"开始获取节目历史数据 (ID: {program_id}),ttl={cache_ttl_seconds}")
     while True:
-        data = fetch_history_list(program_id, page, cache_dir=cache_dir, cache_ttl_seconds=cache_ttl_seconds)
+        _check_state(state_checker, is_chunk=False)
+        data = fetch_history_list(
+            program_id,
+            page,
+            cache_dir=cache_dir,
+            cache_ttl_seconds=cache_ttl_seconds,
+            state_checker=state_checker,
+        )
         if not data:
             break
 
@@ -366,7 +409,7 @@ def fetch_all_history(program_id, *, cache_dir=None, cache_ttl_seconds=API_CACHE
 
 
 def _parse_history_page_items(data):
-    """把 historyList 的响应解析成 (items, total_page, total_size)。"""
+    """把 historyList 的响应解析成 (items, total_page, total_size)"""
     if not data or not isinstance(data, dict):
         return [], 1, 0
     if str(data.get("status")) != "1":
@@ -403,9 +446,16 @@ def _parse_history_page_items(data):
     return items or [], max(int(total_page or 1), 1), max(int(total_size or 0), 0)
 
 
-def _get_history_summary(program_id, *, cache_dir=None, cache_ttl_seconds=API_CACHE_TTL_SECONDS):
-    """拿到 (total_page, total_size, newest_date, oldest_date)。"""
-    d1 = fetch_history_list(program_id, 1, cache_dir=cache_dir, cache_ttl_seconds=cache_ttl_seconds)
+def _get_history_summary(program_id, *, cache_dir=None, cache_ttl_seconds=API_CACHE_TTL_SECONDS, state_checker=None):
+    """拿到 (total_page, total_size, newest_date, oldest_date)"""
+    _check_state(state_checker, is_chunk=False)
+    d1 = fetch_history_list(
+        program_id,
+        1,
+        cache_dir=cache_dir,
+        cache_ttl_seconds=cache_ttl_seconds,
+        state_checker=state_checker,
+    )
     items1, total_page, total_size = _parse_history_page_items(d1)
     newest = ""
     if items1:
@@ -417,20 +467,34 @@ def _get_history_summary(program_id, *, cache_dir=None, cache_ttl_seconds=API_CA
             oldest = _normalize_to_ymd((items1[-1].get("showDate") or "").strip())
         return total_page, total_size, newest, oldest
 
-    dlast = fetch_history_list(program_id, total_page, cache_dir=cache_dir, cache_ttl_seconds=cache_ttl_seconds)
+    _check_state(state_checker, is_chunk=False)
+    dlast = fetch_history_list(
+        program_id,
+        total_page,
+        cache_dir=cache_dir,
+        cache_ttl_seconds=cache_ttl_seconds,
+        state_checker=state_checker,
+    )
     items_last, _, _ = _parse_history_page_items(dlast)
     if items_last:
         oldest = _normalize_to_ymd((items_last[-1].get("showDate") or "").strip())
     return total_page, total_size, newest, oldest
 
 
-def _iter_history_items(program_id, *, cache_dir=None, cache_ttl_seconds=API_CACHE_TTL_SECONDS, oldest_first=False):
-    """按页迭代历史条目。
+def _iter_history_items(program_id, *, cache_dir=None, cache_ttl_seconds=API_CACHE_TTL_SECONDS, oldest_first=False, state_checker=None):
+    """按页迭代历史条目
 
-    - 默认 newest->oldest（页 1..N，页内保持原顺序）。
-    - oldest_first=True：oldest->newest（页 N..1，页内反转）。
+    - 默认 newest->oldest（页 1..N，页内保持原顺序）
+    - oldest_first=True：oldest->newest（页 N..1，页内反转）
     """
-    d1 = fetch_history_list(program_id, 1, cache_dir=cache_dir, cache_ttl_seconds=cache_ttl_seconds)
+    _check_state(state_checker, is_chunk=False)
+    d1 = fetch_history_list(
+        program_id,
+        1,
+        cache_dir=cache_dir,
+        cache_ttl_seconds=cache_ttl_seconds,
+        state_checker=state_checker,
+    )
     items1, total_page, _ = _parse_history_page_items(d1)
     if total_page <= 1:
         items = list(items1 or [])
@@ -442,10 +506,17 @@ def _iter_history_items(program_id, *, cache_dir=None, cache_ttl_seconds=API_CAC
 
     pages = range(total_page, 0, -1) if oldest_first else range(1, total_page + 1)
     for page in pages:
+        _check_state(state_checker, is_chunk=False)
         if page == 1:
             data = d1
         else:
-            data = fetch_history_list(program_id, page, cache_dir=cache_dir, cache_ttl_seconds=cache_ttl_seconds)
+            data = fetch_history_list(
+                program_id,
+                page,
+                cache_dir=cache_dir,
+                cache_ttl_seconds=cache_ttl_seconds,
+                state_checker=state_checker,
+            )
         items, _, _ = _parse_history_page_items(data)
         if not items:
             continue
@@ -457,20 +528,27 @@ def _iter_history_items(program_id, *, cache_dir=None, cache_ttl_seconds=API_CAC
 
 
 def _download_for_span(start_ymd, end_ymd, *, program_ids, base_downloads_dir, download_imgs, state_checker, post_process_cb,
-                       download_progress_cb, name_pattern, filename_template, max_rate_kbps, oldest_first, delay_seconds=0):
-    """两阶段：先摘要（一次性输出所有节目信息）→ 再实际下载。"""
+                       download_progress_cb, name_pattern, filename_template, max_rate_kbps, oldest_first, delay_seconds=0,
+                       cache_ttl_seconds=API_CACHE_TTL_SECONDS):
+    """两阶段：先摘要（一次性输出所有节目信息）→ 再实际下载"""
     api_cache_dir = os.path.join(base_downloads_dir, ".api_cache")
 
     # 归一化边界：内部始终 start <= end，方向由 oldest_first 控制
     if start_ymd > end_ymd:
         start_ymd, end_ymd = end_ymd, start_ymd
 
-    # ---- 阶段 1：摘要（不下载，不走 state_checker/limiter/images） ----
+    # ---- 阶段 1：摘要（不下载；但需要支持 state_checker 以便 GUI 随时停止） ----
     hit_labels = []
     for pid in program_ids:
-        pname = _get_program_name(pid, cache_dir=api_cache_dir)
+        _check_state(state_checker, is_chunk=False)
+        pname = _get_program_name(pid, cache_dir=api_cache_dir, cache_ttl_seconds=cache_ttl_seconds, state_checker=state_checker)
         label = f"{pid} ({pname})"
-        total_page, total_size, newest, oldest = _get_history_summary(pid, cache_dir=api_cache_dir)
+        total_page, total_size, newest, oldest = _get_history_summary(
+            pid,
+            cache_dir=api_cache_dir,
+            cache_ttl_seconds=cache_ttl_seconds,
+            state_checker=state_checker,
+        )
         cover = ""
         if oldest and newest:
             cover = f"{oldest} ~ {newest}"
@@ -482,7 +560,14 @@ def _download_for_span(start_ymd, end_ymd, *, program_ids, base_downloads_dir, d
             cover = "未知"
 
         matched_count = 0
-        for item in _iter_history_items(pid, cache_dir=api_cache_dir, oldest_first=oldest_first):
+        for item in _iter_history_items(
+            pid,
+            cache_dir=api_cache_dir,
+            cache_ttl_seconds=cache_ttl_seconds,
+            oldest_first=oldest_first,
+            state_checker=state_checker,
+        ):
+            _check_state(state_checker, is_chunk=False)
             show_date_ymd = _normalize_to_ymd((item.get("showDate") or "").strip())
             if not show_date_ymd:
                 continue
@@ -530,7 +615,14 @@ def _download_for_span(start_ymd, end_ymd, *, program_ids, base_downloads_dir, d
     # 先把所有命中条目按日期分组
     _date_items = {}  # show_date_ymd -> [(program_name, download_url, pid, item, ...)]
     for pid in hit_labels:
-        for item in _iter_history_items(pid, cache_dir=api_cache_dir, oldest_first=oldest_first):
+        for item in _iter_history_items(
+            pid,
+            cache_dir=api_cache_dir,
+            cache_ttl_seconds=cache_ttl_seconds,
+            oldest_first=oldest_first,
+            state_checker=state_checker,
+        ):
+            _check_state(state_checker, is_chunk=False)
             show_date_raw = (item.get("showDate") or "").strip()
             show_date_ymd = _normalize_to_ymd(show_date_raw) or show_date_raw
             if not show_date_ymd:
@@ -594,7 +686,7 @@ def _download_for_span(start_ymd, end_ymd, *, program_ids, base_downloads_dir, d
             img_url = (item.get("picurl") or item.get("picurl1") or item.get("programUrl") or item.get("imageUrl") or item.get("imageLongUrl") or "")
             if download_imgs and img_url:
                 img_base = os.path.splitext(os.path.basename(file_path))[0]
-                download_image(img_url, images_dir, headers, downloaded_images_log, images_info_log, img_base)
+                download_image(img_url, images_dir, headers, downloaded_images_log, images_info_log, img_base, state_checker=state_checker)
 
             if os.path.exists(file_path):
                 print(f"已存在，跳过下载: {_fmt_path(file_path)}")
@@ -611,7 +703,8 @@ def _download_for_span(start_ymd, end_ymd, *, program_ids, base_downloads_dir, d
             print(f"正在下载 {program_name} 到 {_fmt_path(file_path)}...")
             part_path = file_path + ".part"
             try:
-                r = requests.get(download_url, headers=headers, stream=True, timeout=30)
+                _check_state(state_checker, is_chunk=False)
+                r = requests.get(download_url, headers=headers, stream=True, timeout=(5, 30))
                 r.raise_for_status()
                 with open(part_path, "wb") as f:
                     for chunk in r.iter_content(chunk_size=8192):
@@ -630,7 +723,7 @@ def _download_for_span(start_ymd, end_ymd, *, program_ids, base_downloads_dir, d
                 start_time = (item.get("time", "") or "").split("-")[0].strip()
                 end_time = (item.get("time", "") or "").split("-")[1].strip() if "-" in (item.get("time", "") or "") else ""
                 _write_info_line(base_downloads_dir, show_date_ymd, _day_index, program_name, pid, small_id, start_time, end_time, download_url, file_path)
-                print(f"{program_name} 下载完成。\n")
+                print(f"{program_name} 下载完成\n")
                 if post_process_cb:
                     post_process_cb(os.path.splitext(os.path.basename(file_path))[0], file_path, show_date_ymd or show_date_raw)
             except Exception as e:
@@ -640,8 +733,10 @@ def _download_for_span(start_ymd, end_ymd, *, program_ids, base_downloads_dir, d
                     print("\n>>>> 任务安全切断: 操作取消. <<<<\n")
                     raise
                 print(f"下载失败 {program_name}: {e}")
+        
+        print(f"\n----- {show_date_ymd}  节目下载完成 -----\n")
 
-def download_by_date(date_str, program_ids=None, base_downloads_dir="downloads", download_imgs=True, state_checker=None, post_process_cb=None, download_progress_cb=None, name_filter_regex="", filename_template=r"{date}\{name}", fetch_all=False, max_rate_kbps=0, oldest_first=False, delay_seconds=0):
+def download_by_date(date_str, program_ids=None, base_downloads_dir="downloads", download_imgs=True, state_checker=None, post_process_cb=None, download_progress_cb=None, name_filter_regex="", filename_template=r"{date}\{name}", fetch_all=False, max_rate_kbps=0, oldest_first=False, delay_seconds=0, cache_ttl_seconds=API_CACHE_TTL_SECONDS):
     if program_ids is None:
         program_ids = list(DEFAULT_PROGRAM_IDS)
     name_pattern = None
@@ -658,8 +753,8 @@ def download_by_date(date_str, program_ids=None, base_downloads_dir="downloads",
         for pid in program_ids:
             if state_checker:
                 state_checker(is_chunk=False)
-            label = f"{pid} ({_get_program_name(pid, cache_dir=api_cache_dir)})"
-            items = fetch_all_history(pid, cache_dir=api_cache_dir)
+            label = f"{pid} ({_get_program_name(pid, cache_dir=api_cache_dir, cache_ttl_seconds=cache_ttl_seconds, state_checker=state_checker)})"
+            items = fetch_all_history(pid, cache_dir=api_cache_dir, cache_ttl_seconds=cache_ttl_seconds, state_checker=state_checker)
             if not items:
                 print(f"{label}无可下载条目,跳过")
                 continue
@@ -682,7 +777,7 @@ def download_by_date(date_str, program_ids=None, base_downloads_dir="downloads",
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         }
         for pid in hit_labels:
-            items = fetch_all_history(pid, cache_dir=api_cache_dir)
+            items = fetch_all_history(pid, cache_dir=api_cache_dir, cache_ttl_seconds=cache_ttl_seconds, state_checker=state_checker)
             if not items:
                 continue
             for item in items:
@@ -711,7 +806,7 @@ def download_by_date(date_str, program_ids=None, base_downloads_dir="downloads",
                     img_url = (item.get("picurl") or item.get("picurl1") or item.get("programUrl") or item.get("imageUrl") or item.get("imageLongUrl") or "")
                     if img_url:
                         img_base = os.path.splitext(os.path.basename(file_path))[0]
-                        download_image(img_url, images_dir, headers, downloaded_images_log, images_info_log, img_base)
+                        download_image(img_url, images_dir, headers, downloaded_images_log, images_info_log, img_base, state_checker=state_checker)
                 if os.path.exists(file_path):
                     if post_process_cb:
                         post_process_cb(os.path.splitext(os.path.basename(file_path))[0], file_path, show_date_ymd or date_str)
@@ -719,7 +814,8 @@ def download_by_date(date_str, program_ids=None, base_downloads_dir="downloads",
                 print(f"正在下载 {program_name} 到 {_fmt_path(file_path)}...")
                 part_path = file_path + ".part"
                 try:
-                    r = requests.get(download_url, headers=headers, stream=True, timeout=30)
+                    _check_state(state_checker, is_chunk=False)
+                    r = requests.get(download_url, headers=headers, stream=True, timeout=(5, 30))
                     r.raise_for_status()
                     with open(part_path, "wb") as f:
                         for chunk in r.iter_content(chunk_size=8192):
@@ -732,7 +828,7 @@ def download_by_date(date_str, program_ids=None, base_downloads_dir="downloads",
                                     download_progress_cb(len(chunk))
                                 f.write(chunk)
                     os.replace(part_path, file_path)
-                    print(f"{program_name} 下载完成。\n")
+                    print(f"{program_name} 下载完成\n")
                     if post_process_cb:
                         post_process_cb(os.path.splitext(os.path.basename(file_path))[0], file_path, show_date_ymd or date_str)
                 except Exception as e:
@@ -745,10 +841,11 @@ def download_by_date(date_str, program_ids=None, base_downloads_dir="downloads",
     else:
         target_date_ymd = _normalize_to_ymd(date_str)
         if not target_date_ymd:
-            print(f"错误：日期格式不正确: {date_str}，请使用 'YY-MM-DD' 或 'YYYY-MM-DD'。")
+            print(f"错误：日期格式不正确: {date_str}，请使用 'YY-MM-DD' 或 'YYYY-MM-DD'")
             print("\n---------- 下载转换完成 ----------")
             return
         print(f"正在获取 {target_date_ymd} 的节目列表...")
+        print(f"缓存 TTL: {cache_ttl_seconds/60} 分钟")
         _download_for_span(
             target_date_ymd, target_date_ymd,
             program_ids=program_ids, base_downloads_dir=base_downloads_dir,
@@ -756,10 +853,11 @@ def download_by_date(date_str, program_ids=None, base_downloads_dir="downloads",
             post_process_cb=post_process_cb, download_progress_cb=download_progress_cb,
             name_pattern=name_pattern, filename_template=filename_template,
             max_rate_kbps=max_rate_kbps, oldest_first=oldest_first, delay_seconds=delay_seconds,
+            cache_ttl_seconds=cache_ttl_seconds,
         )
     print("\n---------- 下载转换完成 ----------")
 
-def download_all_programs(program_ids=None, base_downloads_dir="downloads", download_imgs=True, state_checker=None, post_process_cb=None, download_progress_cb=None, name_filter_regex="", filename_template=r"{date}\{name}", max_rate_kbps=0, delay_seconds=0):
+def download_all_programs(program_ids=None, base_downloads_dir="downloads", download_imgs=True, state_checker=None, post_process_cb=None, download_progress_cb=None, name_filter_regex="", filename_template=r"{date}\{name}", max_rate_kbps=0, delay_seconds=0, cache_ttl_seconds=API_CACHE_TTL_SECONDS):
     if program_ids is None:
         program_ids = list(DEFAULT_PROGRAM_IDS)
     
@@ -776,11 +874,13 @@ def download_all_programs(program_ids=None, base_downloads_dir="downloads", down
         fetch_all=True,
         max_rate_kbps=max_rate_kbps,
         delay_seconds=delay_seconds,
+        cache_ttl_seconds=cache_ttl_seconds,
     )
 
 
 def download_by_date_range(start_date_str, end_date_str, program_ids=None, base_downloads_dir="downloads", download_imgs=True, state_checker=None, post_process_cb=None,
-                           download_progress_cb=None, name_filter_regex="", filename_template=r"{date}\{name}", max_rate_kbps=0, delay_seconds=0):
+                           download_progress_cb=None, name_filter_regex="", filename_template=r"{date}\{name}", max_rate_kbps=0, delay_seconds=0,
+                           cache_ttl_seconds=API_CACHE_TTL_SECONDS):
     if program_ids is None:
         program_ids = list(DEFAULT_PROGRAM_IDS)
     name_pattern = None
@@ -793,7 +893,7 @@ def download_by_date_range(start_date_str, end_date_str, program_ids=None, base_
     start_ymd = _normalize_to_ymd(start_date_str)
     end_ymd = _normalize_to_ymd(end_date_str)
     if not start_ymd or not end_ymd:
-        print(f"错误：日期格式不正确: {start_date_str} ~ {end_date_str}，请使用 'YY-MM-DD' 或 'YYYY-MM-DD'。")
+        print(f"错误：日期格式不正确: {start_date_str} ~ {end_date_str}，请使用 'YY-MM-DD' 或 'YYYY-MM-DD'")
         return
     # 原样保持用户的顺序：start→end
     # 如果 end<start，用户期望从新到旧，oldest_first=False（默认新→旧）
@@ -805,6 +905,7 @@ def download_by_date_range(start_date_str, end_date_str, program_ids=None, base_
     _print_section("启动自动化下载管线流")
     order_text = "旧→新" if oldest_first else "新→旧"
     print(f"下载日期范围: {start_ymd} ~ {end_ymd}（{order_text}）")
+    print(f"缓存 TTL: {cache_ttl_seconds / 60} 分钟")
     _download_for_span(
         start_ymd, end_ymd,
         program_ids=program_ids, base_downloads_dir=base_downloads_dir,
@@ -812,6 +913,7 @@ def download_by_date_range(start_date_str, end_date_str, program_ids=None, base_
         post_process_cb=post_process_cb, download_progress_cb=download_progress_cb,
         name_pattern=name_pattern, filename_template=filename_template,
         max_rate_kbps=max_rate_kbps, oldest_first=oldest_first, delay_seconds=delay_seconds,
+        cache_ttl_seconds=cache_ttl_seconds,
     )
     print("\n---------- 下载转换完成 ----------")
 
@@ -827,9 +929,21 @@ if __name__ == "__main__":
     parser.add_argument("--filename-template", help="输出文件名模板", default=r"{date}\{name}")
     parser.add_argument("--rate", help="限速 (KB/s)", type=int, default=0)
     parser.add_argument("--delay", help="每日之间间隔 (秒)", type=float, default=0)
+    parser.add_argument(
+        "--cache-ttl",
+        help="API 缓存 TTL（分钟），默认 360=6小时；0 表示每次都重新请求；负数表示永不过期",
+        type=float,
+        default=float(API_CACHE_TTL_SECONDS) / 60.0,
+    )
 
     args = parser.parse_args()
     p_ids = [pid.strip() for pid in args.program_ids.split(",") if pid.strip()]
+
+    cache_ttl_minutes = float(args.cache_ttl)
+    if cache_ttl_minutes < 0:
+        cache_ttl_seconds = -1
+    else:
+        cache_ttl_seconds = int(cache_ttl_minutes * 60)
     
     if args.all:
         download_all_programs(
@@ -840,6 +954,7 @@ if __name__ == "__main__":
             filename_template=args.filename_template,
             max_rate_kbps=args.rate,
             delay_seconds=float(args.delay or 0),
+            cache_ttl_seconds=cache_ttl_seconds,
         )
     else:
         if " to " in args.date:
@@ -854,6 +969,7 @@ if __name__ == "__main__":
                 filename_template=args.filename_template,
                 max_rate_kbps=args.rate,
                 delay_seconds=float(args.delay or 0),
+                cache_ttl_seconds=cache_ttl_seconds,
             )
         else:
             download_by_date(
@@ -865,4 +981,5 @@ if __name__ == "__main__":
                 filename_template=args.filename_template,
                 max_rate_kbps=args.rate,
                 delay_seconds=float(args.delay or 0),
+                cache_ttl_seconds=cache_ttl_seconds,
             )
