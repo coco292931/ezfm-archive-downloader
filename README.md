@@ -2,7 +2,7 @@
 
 EZFM / Hit FM 历史节目（点播回听）下载器
 
->本项目是[云听下载器](https://github.com/coco292931/YunTing-archive-downloader/)和[阿基米德下载器 ](https://github.com/coco292931/ajmide-archive-downloader/)的姊妹项目，共同隶属于hitfm归档计划中
+>本项目是[云听下载器](https://github.com/coco292931/YunTing-archive-downloader/)和[阿基米德下载器](https://github.com/coco292931/ajmide-archive-downloader/)的姊妹项目，共同隶属于hitfm归档计划中
 
 ## 说明
 
@@ -97,6 +97,7 @@ python downloader.py -d "21-12-31" --name-regex "Music|Morning" --filename-templ
 - `-o OUTDIR`, `--outdir OUTDIR` : 下载的基础输出目录，默认为 `downloads`。
 - `--no-images` : 阻止下载节目封面图片。
 - `--delay DELAY` : 当执行多日持续下载时，请求日期间隔的睡眠时间(秒)，默认 `1.5`。
+- `--cache-ttl CACHE_TTL` : API 响应缓存 TTL（单位：分钟）。默认 `360`（6小时）；`0` 表示每次都重新请求；负数表示永不过期。
 - `--name-regex NAME_REGEX` : 节目名正则筛选，仅下载匹配的节目（默认空，即不过滤）。
 - `--filename-template FILENAME_TEMPLATE` : 自定义输出模板（默认 `{date}\\{name}`，支持 `{id}` `{name}` `{date}` `{start_time}` `{end_time}`）。
 - `--program-ids PROGRAM_IDS` : 大节目ID，逗号分隔（默认全部，即 `431,432,433,434,435,436,437`）。
@@ -107,6 +108,7 @@ python downloader.py -d "21-12-31" --name-regex "Music|Morning" --filename-templ
 高级配置（仅 `config.json`，不在 UI 暴露）：
 
 - `max_rate_kbps`：下载限速（单位 KB/s）。`0` 表示不限速。
+- `response_cache_ttl_minute`：API 响应缓存 TTL（单位：分钟）。默认 `360`（6小时）；`0` 表示每次都重新请求；负数表示永不过期。
 
 ### 2. GUI 界面操作 (推荐)
 
